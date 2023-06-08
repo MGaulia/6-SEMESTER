@@ -1,0 +1,175 @@
+---
+title: "Netiesinė regresija"
+author: "Vainius Gataveckas, Matas Gaulia, Dovydas Martinkus"
+output:
+   word_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r, message=FALSE}
+# Duomenų šaltinis
+# https://archive.ics.uci.edu/ml/datasets/concrete+compressive+strength
+# (https://www.kaggle.com/datasets/elikplim/concrete-compressive-strength-data-set)
+
+library(tidyverse)
+library(rsample)
+
+concrete <- read_csv("concrete_data.csv")
+
+concrete <- concrete %>%
+  unique() %>%
+  rename(strength = concrete_compressive_strength)
+
+# Padalijama į mokymo ir testavimo aibes
+set.seed(123)
+concrete_split <- initial_split(concrete)
+concrete_train <- training(concrete_split)
+concrete_test <- testing(concrete_split)
+```
+
+
+```{r}
+library(corrplot)
+
+correlation_matrix <- concrete_train %>%
+  cor()
+
+corrplot(correlation_matrix, order = "original", method = "color", type = "upper", diag = FALSE, tl.col = "black", addCoef.col = "black")
+```
+
+
+```{r}
+# tarp kovariančių ir atsako matome galimus netiesinis sąryšius
+concrete_train %>%
+  pivot_longer(-strength) %>%
+  ggplot(aes(value, strength)) +
+  geom_point() +
+  facet_wrap(vars(name), scales = "free") +
+  geom_smooth() +
+  theme_minimal()
+```
+
+
+
+
+```{r}
+# Pirma sudaromas regresijos modelis su vien tiesiniais
+  # kovariančių ir atsako sąryšiais (lyginamasis)
+library(car)
+
+baseline <- lm(strength ~ cement + blast_furnace_slag + fly_ash +
+  water + superplasticizer
+  + coarse_aggregate + fine_aggregate + age, data = concrete_train)
+
+
+plot(baseline)
+crPlots(baseline)
+```
+
+
+```{r}
+# "naivus" metodas pagerinti modelį pridedant aukštesnius kovariančių laipsnius
+model_polynomial <- lm(strength ~ cement + +blast_furnace_slag
+  + fly_ash + water + I(water^2)
+  + superplasticizer + I(superplasticizer^2)
+  + coarse_aggregate + fine_aggregate + age + I(age^2),
+data = concrete_train
+)
+
+plot(model_polynomial)
+summary(model_polynomial)
+crPlots(model_polynomial)
+```
+
+
+```{r}
+# modelis reikšmingai skiriasi nuo modelio be aukštesnio laipsnio narių
+anova(baseline, model_polynomial)
+```
+
+
+```{r}
+library(mgcv)
+library(gratia)
+# Alternatyvus modelis: apibendrintas adityvus modelis su glodniaisiais splainais
+
+# lambda parametras parenkamas automatiškai pagal generalized cross-validation
+model_gam <- gam(strength ~ s(cement) + s(blast_furnace_slag) + s(fly_ash)
+  + s(water) + s(superplasticizer)
+  + s(coarse_aggregate) + s(fine_aggregate) + s(age),
+data = concrete_train,
+select = TRUE
+)
+
+gam.check(model_gam)
+summary(model_gam)
+draw(model_gam)
+```
+
+
+
+```{r}
+# Padidinamas mazgų skaičius
+model_gam2 <- gam(strength ~ s(cement) + s(blast_furnace_slag, k = 20) + s(fly_ash, k = 20)
+  + s(water, k = 20) + s(superplasticizer, k = 20)
+  + s(coarse_aggregate, k = 20) + s(fine_aggregate, k = 20) + s(age, k = 10),
+data = concrete_train,
+select = TRUE
+)
+
+gam.check(model_gam2)
+summary(model_gam2)
+draw(model_gam2)
+
+# modelis statistiškai reikšmingai skiriasi nuo modelio su mažesniu mazgų skaičiumi
+anova(model_gam, model_gam2,test="F")
+```
+
+
+
+
+
+```{r fig.width=15, fig.height=12}
+# modelio palyginimas su prieš tai sudarytu polinominės regresijos modeliu
+library(effects)
+AIC(model_polynomial)
+AIC(model_gam2)
+
+plot(predictorEffects(model_polynomial))
+draw(model_gam2,)
+```
+
+
+
+```{r fig.width=16, fig.height=10}
+# Nors naudoti glodnieji splainai, naudojant testavimo aibę patikrinama ar kažkur nebuvo padaryta klaidų ir
+# modelis tikrai nepersimokė
+library(yardstick)
+
+concrete_test <- concrete_test %>%
+  mutate(predicted_baseline = predict(baseline, concrete_test),
+         predicted_polynomial = predict(model_polynomial,concrete_test),
+         predicted_gam = predict(model_gam2,concrete_test))
+
+set <- metric_set(rmse,mae)
+set(concrete_test, strength, predicted_baseline)
+set(concrete_test, strength, predicted_polynomial)
+set(concrete_test, strength, predicted_gam)
+# tiek pagal MAE, tiek pagal RMSE naudojant gam modelį gaunami geresni rezultatai
+
+
+# Modelių prognozių palyginimas
+concrete_test %>%
+  pivot_longer(c(predicted_gam, predicted_polynomial,predicted_baseline)) %>%
+  mutate(name= factor(name,levels=c("predicted_baseline","predicted_polynomial","predicted_gam"))) %>%
+  ggplot(aes(strength, value)) +
+  geom_point(size=2) +
+  facet_wrap(vars(name)) +
+  geom_abline(color = "red", size = 2.25) +
+  labs(x = "Actual", y = "Predicted") +
+  theme_minimal(base_size = 25) 
+```
